@@ -26,11 +26,12 @@ import math
 import warnings
 from collections import defaultdict
 from datetime import datetime
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import numpy as np
 from scipy import stats, optimize
-from scipy.special import ndtri  # z-score (inverse normal CDF)
+from scipy.special import ndtri, ndtr  # z-score (inverse normal CDF) and normal CDF
 from scipy.stats import norm
 import matplotlib
 matplotlib.use("Agg")
@@ -98,6 +99,16 @@ def load_triviaqa_domains(base_dir: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return {i: item.get("domain", "Unclassified") for i, item in enumerate(data)}
+
+
+def load_e2_results(model: str, condition: str, base_dir: str) -> list:
+    """Load E2 prompt-criterion JSONL results."""
+    path = Path(base_dir) / "results" / "e2_prompt_criterion" / f"{model}_{condition}.jsonl"
+    trials = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            trials.append(json.loads(line))
+    return trials
 
 
 # ---------------------------------------------------------------------------
@@ -170,28 +181,27 @@ def evsdt_nll(params, signal_counts, noise_counts):
     params: [d_prime, c_1, c_2, ..., c_{k-1}]
     Signal distribution: N(d', 1)
     Noise distribution: N(0, 1)
+    Fully vectorised using scipy.special.ndtr for speed.
     """
     d_prime = params[0]
     criteria = np.sort(params[1:])  # ensure monotonic
 
-    n_bins = len(signal_counts)
-    # Cumulative probabilities at each criterion
-    # P(evidence > c_i | signal) = 1 - Φ(c_i - d')
-    # P(evidence > c_i | noise) = 1 - Φ(c_i)
-    cum_p_signal = np.array([1.0] + [1 - norm.cdf(c - d_prime) for c in criteria] + [0.0])
-    cum_p_noise = np.array([1.0] + [1 - norm.cdf(c) for c in criteria] + [0.0])
+    # Vectorised cumulative probabilities at each criterion
+    cum_p_signal = np.empty(len(criteria) + 2)
+    cum_p_noise = np.empty(len(criteria) + 2)
+    cum_p_signal[0] = 1.0
+    cum_p_signal[-1] = 0.0
+    cum_p_noise[0] = 1.0
+    cum_p_noise[-1] = 0.0
+    cum_p_signal[1:-1] = 1.0 - ndtr(criteria - d_prime)
+    cum_p_noise[1:-1] = 1.0 - ndtr(criteria)
 
     # Bin probabilities
-    p_signal = np.diff(-cum_p_signal)  # probability in each bin for signal
-    p_noise = np.diff(-cum_p_noise)
-
-    # Clip to avoid log(0)
-    p_signal = np.clip(p_signal, 1e-10, 1.0)
-    p_noise = np.clip(p_noise, 1e-10, 1.0)
+    p_signal = np.clip(np.diff(-cum_p_signal), 1e-10, 1.0)
+    p_noise = np.clip(np.diff(-cum_p_noise), 1e-10, 1.0)
 
     # Multinomial log-likelihood
-    nll = -np.sum(signal_counts * np.log(p_signal)) - np.sum(noise_counts * np.log(p_noise))
-    return nll
+    return -np.sum(signal_counts * np.log(p_signal)) - np.sum(noise_counts * np.log(p_noise))
 
 
 def uvsdt_nll(params, signal_counts, noise_counts):
@@ -199,13 +209,7 @@ def uvsdt_nll(params, signal_counts, noise_counts):
 
     params: [d_a, s, c_1, c_2, ..., c_{k-1}]
     s = σ_noise / σ_signal
-    Signal distribution: N(d_a * sqrt((1+s^2)/2) / s, 1/s^2)  [reparametrized]
-    Noise distribution: N(0, 1)
-
-    We use the parametrisation where:
-      noise ~ N(0, 1)
-      signal ~ N(μ_s, σ_s^2) where σ_s = 1/s
-      μ_s = d_a * sqrt(2 / (1 + s^2))  [from d_a definition]
+    Fully vectorised using scipy.special.ndtr for speed.
     """
     d_a = params[0]
     s = params[1]
@@ -214,23 +218,20 @@ def uvsdt_nll(params, signal_counts, noise_counts):
     sigma_signal = 1.0 / s if s > 0 else 1.0
     mu_signal = d_a * math.sqrt(2.0 / (1.0 + s * s))
 
-    n_bins = len(signal_counts)
-    cum_p_signal = np.array(
-        [1.0]
-        + [1 - norm.cdf((c - mu_signal) / sigma_signal) for c in criteria]
-        + [0.0]
-    )
-    cum_p_noise = np.array(
-        [1.0] + [1 - norm.cdf(c) for c in criteria] + [0.0]
-    )
+    # Vectorised cumulative probabilities
+    cum_p_signal = np.empty(len(criteria) + 2)
+    cum_p_noise = np.empty(len(criteria) + 2)
+    cum_p_signal[0] = 1.0
+    cum_p_signal[-1] = 0.0
+    cum_p_noise[0] = 1.0
+    cum_p_noise[-1] = 0.0
+    cum_p_signal[1:-1] = 1.0 - ndtr((criteria - mu_signal) / sigma_signal)
+    cum_p_noise[1:-1] = 1.0 - ndtr(criteria)
 
-    p_signal = np.diff(-cum_p_signal)
-    p_noise = np.diff(-cum_p_noise)
-    p_signal = np.clip(p_signal, 1e-10, 1.0)
-    p_noise = np.clip(p_noise, 1e-10, 1.0)
+    p_signal = np.clip(np.diff(-cum_p_signal), 1e-10, 1.0)
+    p_noise = np.clip(np.diff(-cum_p_noise), 1e-10, 1.0)
 
-    nll = -np.sum(signal_counts * np.log(p_signal)) - np.sum(noise_counts * np.log(p_noise))
-    return nll
+    return -np.sum(signal_counts * np.log(p_signal)) - np.sum(noise_counts * np.log(p_noise))
 
 
 def fit_sdt_models(roc_data: dict, n_restarts: int = 10) -> dict:
@@ -278,7 +279,7 @@ def fit_sdt_models(roc_data: dict, n_restarts: int = 10) -> dict:
             res = optimize.minimize(
                 evsdt_nll, init_params, args=(signal_counts, noise_counts),
                 method="L-BFGS-B", bounds=bounds,
-                options={"maxiter": 5000, "ftol": 1e-10},
+                options={"maxiter": 5000, "ftol": 1e-8},
             )
             return res
         except Exception:
@@ -305,7 +306,7 @@ def fit_sdt_models(roc_data: dict, n_restarts: int = 10) -> dict:
             res = optimize.minimize(
                 uvsdt_nll, init_params, args=(signal_counts, noise_counts),
                 method="L-BFGS-B", bounds=bounds,
-                options={"maxiter": 5000, "ftol": 1e-10},
+                options={"maxiter": 5000, "ftol": 1e-8},
             )
             return res
         except Exception:
@@ -519,39 +520,78 @@ def dprime_4afc(proportion_correct: float) -> float:
 # Bootstrap (Amendment 5)
 # ---------------------------------------------------------------------------
 
+def _bootstrap_single_iter(args):
+    """Single bootstrap iteration for multiprocessing.
+
+    args: (nlp_signal, nlp_noise, bin_edges, seed)
+    Returns: (d_a, c, auc) or (nan, nan, auc) if UV doesn't converge.
+    """
+    nlp_signal, nlp_noise, bin_edges, seed = args
+    rng = np.random.RandomState(seed)
+
+    sig_sample = nlp_signal[rng.randint(0, len(nlp_signal), size=len(nlp_signal))]
+    noi_sample = nlp_noise[rng.randint(0, len(nlp_noise), size=len(nlp_noise))]
+
+    roc = construct_roc(sig_sample, noi_sample, bin_edges=bin_edges)
+    fit = fit_sdt_models(roc, n_restarts=1)  # 1 restart sufficient for bootstrap variance
+
+    d_a = fit["uv"]["d_a"] if fit["uv"].get("converged") else float("nan")
+    c = fit["c"]
+    auc = fit["auc"]
+    return (d_a, c, auc)
+
+
 def bootstrap_sdt(
     nlp_signal: np.ndarray,
     nlp_noise: np.ndarray,
     bin_edges: np.ndarray,
     n_bootstrap: int = N_BOOTSTRAP,
     seed: int = 42,
+    n_workers: int = None,
+    label: str = "",
 ) -> dict:
     """Bootstrap 95% CIs for d_a, c, and AUC per Amendment 5.
 
     Each iteration: resample trials → re-bin → fit UVSD → extract d_a, c, AUC.
+    Uses multiprocessing for speed with progress reporting.
     """
-    rng = np.random.RandomState(seed)
-    d_a_boot = []
-    c_boot = []
-    auc_boot = []
+    import time as _time
 
-    n_sig = len(nlp_signal)
-    n_noi = len(nlp_noise)
+    if n_workers is None:
+        n_workers = max(1, cpu_count() - 2)
 
-    for b in range(n_bootstrap):
-        # Resample with replacement
-        sig_sample = nlp_signal[rng.randint(0, n_sig, size=n_sig)]
-        noi_sample = nlp_noise[rng.randint(0, n_noi, size=n_noi)]
+    # Build argument list — each iteration gets its own seed
+    iter_args = [
+        (nlp_signal, nlp_noise, bin_edges, seed + i)
+        for i in range(n_bootstrap)
+    ]
 
-        # Re-bin and fit
-        roc = construct_roc(sig_sample, noi_sample, bin_edges=bin_edges)
-        fit = fit_sdt_models(roc, n_restarts=3)  # fewer restarts for speed
+    all_results = []
+    t0 = _time.time()
 
-        if fit["uv"].get("converged"):
-            d_a_boot.append(fit["uv"]["d_a"])
-        if not math.isnan(fit["c"]):
-            c_boot.append(fit["c"])
-        auc_boot.append(fit["auc"])
+    if n_workers > 1:
+        with Pool(n_workers) as pool:
+            for i, result in enumerate(pool.imap_unordered(_bootstrap_single_iter, iter_args)):
+                all_results.append(result)
+                if (i + 1) % 500 == 0 or (i + 1) == n_bootstrap:
+                    elapsed = _time.time() - t0
+                    rate = (i + 1) / elapsed
+                    eta = (n_bootstrap - i - 1) / rate if rate > 0 else 0
+                    print(f"    {label}{i+1}/{n_bootstrap} "
+                          f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)")
+    else:
+        for i, args in enumerate(iter_args):
+            all_results.append(_bootstrap_single_iter(args))
+            if (i + 1) % 500 == 0:
+                elapsed = _time.time() - t0
+                rate = (i + 1) / elapsed
+                eta = (n_bootstrap - i - 1) / rate if rate > 0 else 0
+                print(f"    {label}{i+1}/{n_bootstrap} "
+                      f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)")
+
+    d_a_boot = [r[0] for r in all_results if not math.isnan(r[0])]
+    c_boot = [r[1] for r in all_results if not math.isnan(r[1])]
+    auc_boot = [r[2] for r in all_results]
 
     result = {}
     if d_a_boot:
@@ -602,10 +642,20 @@ def test_h1(results_by_temp: dict, equiv_bounds: dict) -> dict:
     cs = np.array(cs)
 
     # Get equivalence bound for AUC (use the delta from simulation)
-    # Use the most conservative (largest) delta across conditions
-    delta_auc = max(
-        c.get("delta_auc", 0.02) for c in equiv_bounds.get("conditions", [{}])
-    )
+    # Use the most conservative (largest) delta across conditions.
+    # equiv_bounds["conditions"] is a dict keyed by "d_a=X_s=Y".
+    # The bounds sub-dict may be keyed "bounds" or "equivalence_bounds"
+    # depending on which version of the simulation script produced it.
+    conditions = equiv_bounds.get("conditions", {})
+    if conditions:
+        deltas = []
+        for cond in conditions.values():
+            # Try both key formats
+            bounds = cond.get("bounds") or cond.get("equivalence_bounds", {})
+            deltas.append(bounds.get("auc_delta", 0.02))
+        delta_auc = max(deltas)
+    else:
+        delta_auc = 0.02  # fallback
 
     # TOST for AUC equivalence
     # Compare each temp's AUC to the mean AUC
@@ -738,21 +788,38 @@ def test_h3(paradigm_a_by_domain: dict, paradigm_b_by_domain: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
-    """Run the complete pre-registered analysis pipeline."""
+    """Run the complete pre-registered analysis pipeline.
+
+    Checkpoints are saved after each phase so that if a later phase crashes,
+    earlier phases are not re-run.  Delete results/analysis/checkpoints/ to
+    force a full re-run.
+    """
     output_dir = Path(base_dir) / "results" / "analysis"
     output_dir.mkdir(parents=True, exist_ok=True)
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(exist_ok=True)
+    ckpt_dir = output_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
+
+    # --- helpers ---
+    def _save_ckpt(name: str, data):
+        with open(ckpt_dir / f"{name}.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        print(f"  [checkpoint saved: {name}]")
+
+    def _load_ckpt(name: str):
+        p = ckpt_dir / f"{name}.json"
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                print(f"  [checkpoint loaded: {name}]")
+                return json.load(f)
+        return None
 
     equiv_bounds = load_equivalence_bounds(base_dir)
     domains_map = load_triviaqa_domains(base_dir)
 
     models = ["llama3_instruct", "mistral_instruct", "llama3_base"]
     datasets = ["triviaqa", "nq"]
-
-    all_results = {}
-    h1_inputs = {}
-    h2_inputs = {}
 
     print("=" * 70)
     print("SDT Calibration — Full Analysis Pipeline")
@@ -763,248 +830,393 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
     # -----------------------------------------------------------------------
     print("\n--- Phase 1: Paradigm A analysis ---")
 
-    for model in models:
-        all_results[model] = {}
-        h1_inputs[model] = {}
-        h2_inputs[model] = {}
+    cached_p1 = _load_ckpt("phase1_paradigm_a")
+    if cached_p1 is not None:
+        all_results = cached_p1
+    else:
+        all_results = {}
+        for model in models:
+            all_results[model] = {}
 
-        for dataset in datasets:
-            try:
-                trials = load_paradigm_a_results(model, dataset, base_dir)
-            except FileNotFoundError:
-                print(f"  Skipping {model} × {dataset} (no data)")
-                continue
-
-            print(f"\n  {model} × {dataset}: {len(trials)} trials")
-
-            # Group by temperature
-            by_temp = defaultdict(list)
-            for t in trials:
-                by_temp[t["temperature"]].append(t)
-
-            # Determine bin edges from T=1.0 data (§6)
-            t10_trials = by_temp.get(1.0, [])
-            if t10_trials:
-                all_nlp_t10 = np.array([t["nlp"] for t in t10_trials])
-                t10_min, t10_max = np.min(all_nlp_t10), np.max(all_nlp_t10)
-                bin_edges = np.linspace(t10_min, t10_max + 1e-10, N_BINS + 1)
-            else:
-                bin_edges = None
-
-            results_by_temp = {}
-            for temp in ALL_TEMPS:
-                temp_trials = by_temp.get(temp, [])
-                if not temp_trials:
+            for dataset in datasets:
+                try:
+                    trials = load_paradigm_a_results(model, dataset, base_dir)
+                except FileNotFoundError:
+                    print(f"  Skipping {model} × {dataset} (no data)")
                     continue
 
-                nlp_vals = np.array([t["nlp"] for t in temp_trials])
-                correct = np.array([t["correct"] for t in temp_trials])
-                confidence = np.array([t["answer_softmax_prob"] for t in temp_trials])
+                print(f"\n  {model} × {dataset}: {len(trials)} trials")
 
-                # Issue 1 diagnostic: sequence probability underflow.
-                # For multi-token answers, P(answer) = Π p(t_i) can be
-                # vanishingly small, causing most values to sit in ECE bin 0.
-                # We report: (1) primary ECE per §B.4 using answer_softmax_prob,
-                # (2) fraction of trials with confidence == 0.0 (underflow),
-                # (3) supplementary ECE using NLP mapped to [0,1] via rank
-                #     transform (documented deviation if primary ECE is degenerate).
-                n_underflow = int(np.sum(confidence == 0.0))
-                frac_underflow = n_underflow / len(confidence) if len(confidence) > 0 else 0
+                # Group by temperature
+                by_temp = defaultdict(list)
+                for t in trials:
+                    by_temp[t["temperature"]].append(t)
 
-                # Flag gibberish (§6)
-                gibberish_mask = nlp_vals < NLP_GIBBERISH_THRESHOLD
-                n_gibberish = int(np.sum(gibberish_mask))
-
-                # Signal = correct, Noise = incorrect
-                nlp_signal = nlp_vals[correct]
-                nlp_noise = nlp_vals[~correct]
-
-                if len(nlp_signal) < 10 or len(nlp_noise) < 10:
-                    print(f"    T={temp}: too few signal/noise ({len(nlp_signal)}/{len(nlp_noise)})")
-                    continue
-
-                # ROC
-                roc = construct_roc(nlp_signal, nlp_noise, bin_edges=bin_edges)
-
-                # SDT fitting
-                sdt = fit_sdt_models(roc)
-
-                # ECE (§B.4) — primary: softmax probability on [0, 1]
-                ece = compute_ece(confidence, correct.astype(float))
-                ece["n_underflow"] = n_underflow
-                ece["frac_underflow"] = frac_underflow
-
-                # Supplementary ECE: NLP mapped to [0,1] via min-max scaling.
-                # Reported alongside primary ECE as methodological metadata.
-                # Only meaningful if primary ECE is degenerate (>50% underflow).
-                nlp_min, nlp_max = np.min(nlp_vals), np.max(nlp_vals)
-                if nlp_max > nlp_min:
-                    nlp_confidence = (nlp_vals - nlp_min) / (nlp_max - nlp_min)
+                # Determine bin edges from T=1.0 data (§6)
+                t10_trials = by_temp.get(1.0, [])
+                if t10_trials:
+                    all_nlp_t10 = np.array([t["nlp"] for t in t10_trials])
+                    t10_min, t10_max = np.min(all_nlp_t10), np.max(all_nlp_t10)
+                    bin_edges = np.linspace(t10_min, t10_max + 1e-10, N_BINS + 1)
                 else:
-                    nlp_confidence = np.full_like(nlp_vals, 0.5)
-                ece_nlp = compute_ece(nlp_confidence, correct.astype(float))
-                ece["ece_nlp_supplementary"] = ece_nlp["ece"]
+                    bin_edges = None
 
-                # Refusal/preamble rates
-                n_refusal = sum(1 for t in temp_trials if t.get("refusal_flag"))
-                n_preamble = sum(1 for t in temp_trials if t.get("preamble_flag"))
+                results_by_temp = {}
+                for temp in ALL_TEMPS:
+                    temp_trials = by_temp.get(temp, [])
+                    if not temp_trials:
+                        continue
 
-                temp_result = {
-                    **sdt,
-                    "roc": {k: v if not isinstance(v, np.ndarray) else v.tolist()
-                            for k, v in roc.items()},
-                    "ece": ece,
-                    "accuracy": float(np.mean(correct)),
-                    "n_trials": len(temp_trials),
-                    "n_signal": int(np.sum(correct)),
-                    "n_noise": int(np.sum(~correct)),
-                    "n_gibberish": n_gibberish,
-                    "n_refusal": n_refusal,
-                    "n_preamble": n_preamble,
-                    "refusal_rate": n_refusal / len(temp_trials),
-                    "preamble_rate": n_preamble / len(temp_trials),
-                    "nlp_mean": float(np.mean(nlp_vals)),
-                    "nlp_std": float(np.std(nlp_vals)),
-                }
+                    nlp_vals = np.array([t["nlp"] for t in temp_trials])
+                    correct = np.array([t["correct"] for t in temp_trials])
+                    confidence = np.array([t["answer_softmax_prob"] for t in temp_trials])
 
-                results_by_temp[str(temp)] = temp_result
+                    n_underflow = int(np.sum(confidence == 0.0))
+                    frac_underflow = n_underflow / len(confidence) if len(confidence) > 0 else 0
 
-                print(
-                    f"    T={temp}: acc={temp_result['accuracy']:.3f} "
-                    f"d_a={sdt['uv'].get('d_a', 'N/A'):.3f} "
-                    f"c={sdt['c']:.3f} "
-                    f"AUC={sdt['auc']:.3f} "
-                    f"ECE={ece['ece']:.3f}"
-                    if sdt['uv'].get('converged') else
-                    f"    T={temp}: acc={temp_result['accuracy']:.3f} (UV did not converge)"
-                )
+                    gibberish_mask = nlp_vals < NLP_GIBBERISH_THRESHOLD
+                    n_gibberish = int(np.sum(gibberish_mask))
 
-            all_results[model][dataset] = results_by_temp
-            h1_inputs[model][dataset] = results_by_temp
-            h2_inputs[model][dataset] = results_by_temp
+                    nlp_signal = nlp_vals[correct]
+                    nlp_noise = nlp_vals[~correct]
+
+                    if len(nlp_signal) < 10 or len(nlp_noise) < 10:
+                        print(f"    T={temp}: too few signal/noise ({len(nlp_signal)}/{len(nlp_noise)})")
+                        continue
+
+                    roc = construct_roc(nlp_signal, nlp_noise, bin_edges=bin_edges)
+                    sdt = fit_sdt_models(roc)
+
+                    ece = compute_ece(confidence, correct.astype(float))
+                    ece["n_underflow"] = n_underflow
+                    ece["frac_underflow"] = frac_underflow
+
+                    nlp_min, nlp_max = np.min(nlp_vals), np.max(nlp_vals)
+                    if nlp_max > nlp_min:
+                        nlp_confidence = (nlp_vals - nlp_min) / (nlp_max - nlp_min)
+                    else:
+                        nlp_confidence = np.full_like(nlp_vals, 0.5)
+                    ece_nlp = compute_ece(nlp_confidence, correct.astype(float))
+                    ece["ece_nlp_supplementary"] = ece_nlp["ece"]
+
+                    n_refusal = sum(1 for t in temp_trials if t.get("refusal_flag"))
+                    n_preamble = sum(1 for t in temp_trials if t.get("preamble_flag"))
+
+                    temp_result = {
+                        **sdt,
+                        "roc": {k: v if not isinstance(v, np.ndarray) else v.tolist()
+                                for k, v in roc.items()},
+                        "ece": ece,
+                        "accuracy": float(np.mean(correct)),
+                        "n_trials": len(temp_trials),
+                        "n_signal": int(np.sum(correct)),
+                        "n_noise": int(np.sum(~correct)),
+                        "n_gibberish": n_gibberish,
+                        "n_refusal": n_refusal,
+                        "n_preamble": n_preamble,
+                        "refusal_rate": n_refusal / len(temp_trials),
+                        "preamble_rate": n_preamble / len(temp_trials),
+                        "nlp_mean": float(np.mean(nlp_vals)),
+                        "nlp_std": float(np.std(nlp_vals)),
+                    }
+
+                    results_by_temp[str(temp)] = temp_result
+
+                    print(
+                        f"    T={temp}: acc={temp_result['accuracy']:.3f} "
+                        f"d_a={sdt['uv'].get('d_a', 'N/A'):.3f} "
+                        f"c={sdt['c']:.3f} "
+                        f"AUC={sdt['auc']:.3f} "
+                        f"ECE={ece['ece']:.3f}"
+                        if sdt['uv'].get('converged') else
+                        f"    T={temp}: acc={temp_result['accuracy']:.3f} (UV did not converge)"
+                    )
+
+                all_results[model][dataset] = results_by_temp
+
+        _save_ckpt("phase1_paradigm_a", all_results)
+
+    # h1/h2 inputs are the same structure as all_results
+    h1_inputs = all_results
+    h2_inputs = all_results
 
     # -----------------------------------------------------------------------
     # 2. Paradigm B: 4AFC analysis
     # -----------------------------------------------------------------------
     print("\n--- Phase 2: Paradigm B (4AFC) analysis ---")
 
-    paradigm_b_results = {}
-    for model in models:
-        try:
-            b_trials = load_paradigm_b_results(model, base_dir)
-        except FileNotFoundError:
-            print(f"  Skipping {model} (no Paradigm B data)")
-            continue
+    cached_p2 = _load_ckpt("phase2_paradigm_b")
+    if cached_p2 is not None:
+        paradigm_b_results = cached_p2
+    else:
+        paradigm_b_results = {}
+        for model in models:
+            try:
+                b_trials = load_paradigm_b_results(model, base_dir)
+            except FileNotFoundError:
+                print(f"  Skipping {model} (no Paradigm B data)")
+                continue
 
-        total = len(b_trials)
-        correct = sum(1 for t in b_trials if t["correct"])
-        p_correct = correct / total if total > 0 else 0.25
+            total = len(b_trials)
+            correct = sum(1 for t in b_trials if t["correct"])
+            p_correct = correct / total if total > 0 else 0.25
 
-        d_prime = dprime_4afc(p_correct)
+            d_prime = dprime_4afc(p_correct)
 
-        # Domain-level (for H3)
-        # Map question_index to domain (only for TriviaQA 4AFC questions)
-        domain_correct = defaultdict(lambda: {"correct": 0, "total": 0})
-        for t in b_trials:
-            q_idx = t.get("question_index", -1)
-            domain = domains_map.get(q_idx, "Unclassified")
-            domain_correct[domain]["total"] += 1
-            if t["correct"]:
-                domain_correct[domain]["correct"] += 1
+            domain_correct = defaultdict(lambda: {"correct": 0, "total": 0})
+            for t in b_trials:
+                q_idx = t.get("question_index", -1)
+                domain = domains_map.get(q_idx, "Unclassified")
+                domain_correct[domain]["total"] += 1
+                if t["correct"]:
+                    domain_correct[domain]["correct"] += 1
 
-        domain_dprime = {}
-        for domain, counts in domain_correct.items():
-            if counts["total"] >= 50:  # minimum for stable estimate
-                pc = counts["correct"] / counts["total"]
-                domain_dprime[domain] = {
-                    "p_correct": pc,
-                    "d_prime_4afc": dprime_4afc(pc),
-                    "n": counts["total"],
-                }
+            domain_dprime = {}
+            for domain, counts in domain_correct.items():
+                if counts["total"] >= 50:
+                    pc = counts["correct"] / counts["total"]
+                    domain_dprime[domain] = {
+                        "p_correct": pc,
+                        "d_prime_4afc": dprime_4afc(pc),
+                        "n": counts["total"],
+                    }
 
-        # Compliance check
-        compliance_fails = sum(1 for t in b_trials if t.get("label_probs_sum", 1) < 0.50)
-        compliance_rate = 1 - compliance_fails / total
+            compliance_fails = sum(1 for t in b_trials if t.get("label_probs_sum", 1) < 0.50)
+            compliance_rate = 1 - compliance_fails / total
 
-        paradigm_b_results[model] = {
-            "total": total,
-            "correct": correct,
-            "p_correct": p_correct,
-            "d_prime_4afc": d_prime,
-            "compliance_rate": compliance_rate,
-            "domain_results": domain_dprime,
-        }
+            paradigm_b_results[model] = {
+                "total": total,
+                "correct": correct,
+                "p_correct": p_correct,
+                "d_prime_4afc": d_prime,
+                "compliance_rate": compliance_rate,
+                "domain_results": domain_dprime,
+            }
 
-        print(f"  {model}: P(correct)={p_correct:.3f}, d'_4AFC={d_prime:.3f}, "
-              f"compliance={compliance_rate:.3f}")
+            print(f"  {model}: P(correct)={p_correct:.3f}, d'_4AFC={d_prime:.3f}, "
+                  f"compliance={compliance_rate:.3f}")
+
+        _save_ckpt("phase2_paradigm_b", paradigm_b_results)
 
     # -----------------------------------------------------------------------
     # 3. Analysis A: force-decode
     # -----------------------------------------------------------------------
     print("\n--- Phase 3: Analysis A (force-decode) ---")
 
-    analysis_a_results = {}
-    for model in models:
-        analysis_a_results[model] = {}
-        for dataset in datasets:
-            try:
-                a_trials = load_analysis_a_results(model, dataset, base_dir)
-            except FileNotFoundError:
-                print(f"  Skipping {model} × {dataset} (no Analysis A data)")
-                continue
+    cached_p3 = _load_ckpt("phase3_analysis_a")
+    if cached_p3 is not None:
+        analysis_a_results = cached_p3
+    else:
+        analysis_a_results = {}
+        for model in models:
+            analysis_a_results[model] = {}
+            for dataset in datasets:
+                try:
+                    a_trials = load_analysis_a_results(model, dataset, base_dir)
+                except FileNotFoundError:
+                    print(f"  Skipping {model} × {dataset} (no Analysis A data)")
+                    continue
 
-            # Signal: nlp_correct for all questions
-            nlp_signal = np.array([t["nlp_correct"] for t in a_trials
-                                   if t["nlp_correct"] is not None
-                                   and not math.isinf(t["nlp_correct"])])
+                nlp_signal = np.array([t["nlp_correct"] for t in a_trials
+                                       if t["nlp_correct"] is not None
+                                       and not math.isinf(t["nlp_correct"])])
 
-            # Noise: nlp_incorrect for questions where T=1.0 was wrong
-            nlp_noise = np.array([t["nlp_incorrect"] for t in a_trials
-                                  if t["nlp_incorrect"] is not None
-                                  and not math.isinf(t["nlp_incorrect"])])
+                nlp_noise = np.array([t["nlp_incorrect"] for t in a_trials
+                                      if t["nlp_incorrect"] is not None
+                                      and not math.isinf(t["nlp_incorrect"])])
 
-            if len(nlp_signal) < 10 or len(nlp_noise) < 10:
-                print(f"  {model} × {dataset}: too few signal/noise for Analysis A")
-                continue
+                if len(nlp_signal) < 10 or len(nlp_noise) < 10:
+                    print(f"  {model} × {dataset}: too few signal/noise for Analysis A")
+                    continue
 
-            roc = construct_roc(nlp_signal, nlp_noise)
-            sdt = fit_sdt_models(roc)
+                roc = construct_roc(nlp_signal, nlp_noise)
+                sdt = fit_sdt_models(roc)
 
-            # Amendment 1: random incorrect noise
-            nlp_random_noise = np.array([
-                t["nlp_random_incorrect"] for t in a_trials
-                if t.get("nlp_random_incorrect") is not None
-                and not math.isinf(t.get("nlp_random_incorrect", float("-inf")))
-            ])
+                nlp_random_noise = np.array([
+                    t["nlp_random_incorrect"] for t in a_trials
+                    if t.get("nlp_random_incorrect") is not None
+                    and not math.isinf(t.get("nlp_random_incorrect", float("-inf")))
+                ])
 
-            amend1 = {}
-            if len(nlp_random_noise) >= 10:
-                roc_random = construct_roc(nlp_signal, nlp_random_noise)
-                sdt_random = fit_sdt_models(roc_random)
-                amend1 = {
-                    "d_a_model_noise": sdt["uv"].get("d_a"),
-                    "d_a_random_noise": sdt_random["uv"].get("d_a"),
-                    "d_a_difference": abs(
-                        (sdt["uv"].get("d_a", 0) or 0) -
-                        (sdt_random["uv"].get("d_a", 0) or 0)
-                    ),
-                    "convergent": abs(
-                        (sdt["uv"].get("d_a", 0) or 0) -
-                        (sdt_random["uv"].get("d_a", 0) or 0)
-                    ) < 0.2,
+                amend1 = {}
+                if len(nlp_random_noise) >= 10:
+                    roc_random = construct_roc(nlp_signal, nlp_random_noise)
+                    sdt_random = fit_sdt_models(roc_random)
+                    amend1 = {
+                        "d_a_model_noise": sdt["uv"].get("d_a"),
+                        "d_a_random_noise": sdt_random["uv"].get("d_a"),
+                        "d_a_difference": abs(
+                            (sdt["uv"].get("d_a", 0) or 0) -
+                            (sdt_random["uv"].get("d_a", 0) or 0)
+                        ),
+                        "convergent": abs(
+                            (sdt["uv"].get("d_a", 0) or 0) -
+                            (sdt_random["uv"].get("d_a", 0) or 0)
+                        ) < 0.2,
+                    }
+
+                analysis_a_results[model][dataset] = {
+                    **sdt,
+                    "n_signal": len(nlp_signal),
+                    "n_noise": len(nlp_noise),
+                    "amendment_1": amend1,
                 }
 
-            analysis_a_results[model][dataset] = {
-                **sdt,
-                "n_signal": len(nlp_signal),
-                "n_noise": len(nlp_noise),
-                "amendment_1": amend1,
-            }
+                d_a_str = f"{sdt['uv']['d_a']:.3f}" if sdt['uv'].get('converged') else "N/A"
+                print(f"  {model} × {dataset}: d_a={d_a_str}, "
+                      f"AUC={sdt['auc']:.3f}, "
+                      f"signal={len(nlp_signal)}, noise={len(nlp_noise)}")
 
-            d_a_str = f"{sdt['uv']['d_a']:.3f}" if sdt['uv'].get('converged') else "N/A"
-            print(f"  {model} × {dataset}: d_a={d_a_str}, "
-                  f"AUC={sdt['auc']:.3f}, "
-                  f"signal={len(nlp_signal)}, noise={len(nlp_noise)}")
+        _save_ckpt("phase3_analysis_a", analysis_a_results)
+
+    # -----------------------------------------------------------------------
+    # 3b. Domain-level Paradigm A analysis (for H3, H5, §B.4.1)
+    # -----------------------------------------------------------------------
+    print("\n--- Phase 3b: Domain-level analysis (TriviaQA, T=1.0) ---")
+
+    # §B.1.3: N ≥ 500 per domain in the 5000-question TriviaQA set
+    DOMAIN_MIN_N = 500
+
+    cached_p3b = _load_ckpt("phase3b_domain")
+    if cached_p3b is not None:
+        domain_results = cached_p3b
+    else:
+        # First, report domain distribution (§B.1.2 step 5)
+        domain_counts = defaultdict(int)
+        for idx, domain in domains_map.items():
+            domain_counts[domain] += 1
+        total_q = sum(domain_counts.values())
+        print(f"  Domain distribution ({total_q} questions):")
+        qualifying_domains = []
+        for domain in sorted(domain_counts, key=domain_counts.get, reverse=True):
+            n = domain_counts[domain]
+            status = "✓" if n >= DOMAIN_MIN_N else "✗ (< 500, merged to Unclassified)"
+            print(f"    {domain}: {n} ({100*n/total_q:.1f}%) {status}")
+            if n >= DOMAIN_MIN_N:
+                qualifying_domains.append(domain)
+
+        if len(qualifying_domains) < 3:
+            print(f"  WARNING: Only {len(qualifying_domains)} domains meet N≥500. "
+                  f"H5 reported as underpowered per §B.1.3.")
+
+        # Build mapping: for domains below threshold, remap to Unclassified
+        # per §B.1.3 (for domain-specific analyses only)
+        domain_remap = {}
+        for idx, domain in domains_map.items():
+            if domain in qualifying_domains:
+                domain_remap[idx] = domain
+            else:
+                domain_remap[idx] = "Unclassified"
+
+        domain_results = {
+            "domain_distribution": dict(domain_counts),
+            "qualifying_domains": qualifying_domains,
+            "n_qualifying": len(qualifying_domains),
+            "paradigm_a": {},
+            "paradigm_b": {},
+        }
+
+        # --- Domain-level Paradigm A at T=1.0 ---
+        # Use the same bin edges as aggregate (from T=1.0 data)
+        for model in models:
+            domain_results["paradigm_a"][model] = {}
+            try:
+                trials = load_paradigm_a_results(model, "triviaqa", base_dir)
+            except FileNotFoundError:
+                print(f"  Skipping {model} (no TriviaQA data)")
+                continue
+
+            # Filter to T=1.0 only
+            t10_trials = [t for t in trials if t["temperature"] == 1.0]
+            if not t10_trials:
+                print(f"  {model}: no T=1.0 trials")
+                continue
+
+            # Bin edges from aggregate T=1.0 data (same as Phase 1)
+            all_nlp_t10 = np.array([t["nlp"] for t in t10_trials])
+            bin_edges = np.linspace(
+                np.min(all_nlp_t10), np.max(all_nlp_t10) + 1e-10, N_BINS + 1
+            )
+
+            # Group trials by domain (using the remapped domains)
+            by_domain = defaultdict(list)
+            for t in t10_trials:
+                q_idx = t.get("question_index", -1)
+                domain = domain_remap.get(q_idx, "Unclassified")
+                by_domain[domain].append(t)
+
+            for domain in qualifying_domains:
+                d_trials = by_domain.get(domain, [])
+                if not d_trials:
+                    continue
+
+                nlp_vals = np.array([t["nlp"] for t in d_trials])
+                correct = np.array([t["correct"] for t in d_trials])
+                confidence = np.array([t["answer_softmax_prob"] for t in d_trials])
+
+                nlp_signal = nlp_vals[correct]
+                nlp_noise = nlp_vals[~correct]
+
+                if len(nlp_signal) < 10 or len(nlp_noise) < 10:
+                    print(f"  {model} × {domain}: too few signal/noise "
+                          f"({len(nlp_signal)}/{len(nlp_noise)})")
+                    continue
+
+                roc = construct_roc(nlp_signal, nlp_noise, bin_edges=bin_edges)
+                sdt = fit_sdt_models(roc)
+                ece = compute_ece(confidence, correct.astype(float))
+
+                domain_results["paradigm_a"][model][domain] = {
+                    "d_a": sdt["uv"].get("d_a"),
+                    "s": sdt["uv"].get("s"),
+                    "c": sdt["c"],
+                    "auc": sdt["auc"],
+                    "ece": ece["ece"],
+                    "accuracy": float(np.mean(correct)),
+                    "n_trials": len(d_trials),
+                    "n_signal": int(np.sum(correct)),
+                    "n_noise": int(np.sum(~correct)),
+                    "uv_converged": sdt["uv"].get("converged", False),
+                    "z_roc": sdt.get("z_roc", {}),
+                }
+
+                d_a_str = f"{sdt['uv']['d_a']:.3f}" if sdt["uv"].get("converged") else "N/A"
+                print(f"    {model} × {domain} (n={len(d_trials)}): "
+                      f"d_a={d_a_str}, AUC={sdt['auc']:.3f}, "
+                      f"acc={np.mean(correct):.3f}, ECE={ece['ece']:.3f}")
+
+        # --- Domain-level Paradigm B ---
+        # Recompute with the pre-registered N≥500 qualifying domains
+        # and the remapped domain labels
+        for model in models:
+            domain_results["paradigm_b"][model] = {}
+            try:
+                b_trials = load_paradigm_b_results(model, base_dir)
+            except FileNotFoundError:
+                continue
+
+            by_domain_b = defaultdict(lambda: {"correct": 0, "total": 0})
+            for t in b_trials:
+                q_idx = t.get("question_index", -1)
+                domain = domain_remap.get(q_idx, "Unclassified")
+                by_domain_b[domain]["total"] += 1
+                if t["correct"]:
+                    by_domain_b[domain]["correct"] += 1
+
+            for domain in qualifying_domains:
+                counts = by_domain_b.get(domain, {"correct": 0, "total": 0})
+                if counts["total"] < 20:  # need minimum for stable d'
+                    continue
+                pc = counts["correct"] / counts["total"]
+                domain_results["paradigm_b"][model][domain] = {
+                    "p_correct": pc,
+                    "d_prime_4afc": dprime_4afc(pc),
+                    "n": counts["total"],
+                }
+                print(f"    {model} × {domain} (4AFC, n={counts['total']}): "
+                      f"P(c)={pc:.3f}, d'={dprime_4afc(pc):.3f}")
+
+        _save_ckpt("phase3b_domain", domain_results)
 
     # -----------------------------------------------------------------------
     # 4. Hypothesis tests
@@ -1027,30 +1239,27 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
           f"SDT divergent={h2_result.get('sdt_divergent')}, "
           f"supported={h2_result.get('h2_supported')}")
 
-    # H3 (paradigm convergence per model)
+    # H3 (paradigm convergence per model) — now using domain-level data
     h3_results = {}
-    for model in ["llama3_instruct", "mistral_instruct"]:
-        # Get domain-level d_a from Paradigm A at T=1.0
-        if model not in all_results:
-            continue
-        triviaqa_temps = all_results[model].get("triviaqa", {})
-        t10_result = triviaqa_temps.get("1.0", {})
+    for model in models:
+        pa_domain = domain_results.get("paradigm_a", {}).get(model, {})
+        pb_domain = domain_results.get("paradigm_b", {}).get(model, {})
 
-        # We need domain-level ROC construction — use the raw trials
-        # This requires re-loading and grouping by domain
-        # For now, use the aggregate and note this needs domain-level expansion
-        pa_domain = {}  # domain -> d_a
-        pb_domain = paradigm_b_results.get(model, {}).get("domain_results", {})
-
-        # TODO: domain-level Paradigm A analysis (requires grouping trials by domain
-        # and running ROC + SDT per domain). For now, report aggregate.
         if pa_domain and pb_domain:
             h3 = test_h3(pa_domain, pb_domain)
             h3_results[model] = h3
-            print(f"  H3 {model}: r={h3.get('pearson_r', 'N/A')}, "
-                  f"supported={h3.get('h3_supported')}")
+            if "error" in h3:
+                print(f"  H3 {model}: {h3['error']}")
+            else:
+                print(f"  H3 {model}: r={h3['pearson_r']:.3f} (p={h3['pearson_p']:.4f}), "
+                      f"mean|Δ|={h3['mean_abs_difference']:.3f}, "
+                      f"domains={h3['domains']}, "
+                      f"supported={h3['h3_supported']}")
         else:
-            print(f"  H3 {model}: deferred (requires domain-level Paradigm A analysis)")
+            n_pa = len(pa_domain)
+            n_pb = len(pb_domain)
+            print(f"  H3 {model}: insufficient domain data "
+                  f"(Paradigm A: {n_pa} domains, Paradigm B: {n_pb} domains)")
 
     # -----------------------------------------------------------------------
     # 5. Bootstrap CIs (Amendment 5)
@@ -1058,14 +1267,125 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
     print("\n--- Phase 5: Bootstrap CIs ---")
     print("  (This may take several hours on CPU. Run separately if needed.)")
 
-    # Bootstrap is computationally expensive — provide a flag
-    # For now, structure the code but don't run by default
     bootstrap_results = {}
-    # Uncomment to run:
-    # for model in ["llama3_instruct", "mistral_instruct"]:
-    #     for dataset in datasets:
-    #         for temp in ALL_TEMPS:
-    #             ...
+
+    # -----------------------------------------------------------------------
+    # 5b. E2: Prompt-based criterion manipulation (§4.3 E2)
+    # -----------------------------------------------------------------------
+    print("\n--- Phase 5b: E2 Prompt-criterion analysis ---")
+
+    E2_CONDITIONS = ["liberal", "conservative"]
+    E2_MODELS = ["llama3_instruct", "mistral_instruct"]  # instruct only
+
+    cached_e2 = _load_ckpt("phase5b_e2")
+    if cached_e2 is not None:
+        e2_results = cached_e2
+    else:
+        e2_results = {}
+        for model in E2_MODELS:
+            e2_results[model] = {}
+
+            # Neutral condition = Paradigm A T=1.0 TriviaQA (already computed)
+            neutral_data = all_results.get(model, {}).get("triviaqa", {}).get("1.0", {})
+            if neutral_data:
+                e2_results[model]["neutral"] = {
+                    "d_a": neutral_data.get("uv", {}).get("d_a"),
+                    "s": neutral_data.get("uv", {}).get("s"),
+                    "c": neutral_data.get("c"),
+                    "auc": neutral_data.get("auc"),
+                    "accuracy": neutral_data.get("accuracy"),
+                    "ece": neutral_data.get("ece", {}).get("ece"),
+                    "n_trials": neutral_data.get("n_trials"),
+                    "n_refusal": neutral_data.get("n_refusal", 0),
+                    "source": "paradigm_a_t1.0",
+                }
+                print(f"  {model} × neutral (from Paradigm A T=1.0): "
+                      f"d_a={e2_results[model]['neutral']['d_a']:.3f}, "
+                      f"c={e2_results[model]['neutral']['c']:.3f}, "
+                      f"AUC={e2_results[model]['neutral']['auc']:.3f}")
+
+            # Get bin edges from neutral T=1.0 data (held constant across conditions)
+            try:
+                neutral_trials = load_paradigm_a_results(model, "triviaqa", base_dir)
+                t10_neutral = [t for t in neutral_trials if t["temperature"] == 1.0]
+                all_nlp_neutral = np.array([t["nlp"] for t in t10_neutral])
+                bin_edges = np.linspace(
+                    np.min(all_nlp_neutral), np.max(all_nlp_neutral) + 1e-10, N_BINS + 1
+                )
+            except FileNotFoundError:
+                print(f"  Skipping {model} (no neutral data for bin edges)")
+                continue
+
+            # Liberal and conservative conditions
+            for condition in E2_CONDITIONS:
+                try:
+                    trials = load_e2_results(model, condition, base_dir)
+                except FileNotFoundError:
+                    print(f"  Skipping {model} × {condition} (no data)")
+                    continue
+
+                nlp_vals = np.array([t["nlp"] for t in trials])
+                correct = np.array([t["correct"] for t in trials])
+                confidence = np.array([t["answer_softmax_prob"] for t in trials])
+
+                nlp_signal = nlp_vals[correct]
+                nlp_noise = nlp_vals[~correct]
+
+                if len(nlp_signal) < 10 or len(nlp_noise) < 10:
+                    print(f"  {model} × {condition}: too few signal/noise")
+                    continue
+
+                roc = construct_roc(nlp_signal, nlp_noise, bin_edges=bin_edges)
+                sdt = fit_sdt_models(roc)
+                ece = compute_ece(confidence, correct.astype(float))
+
+                n_refusal = sum(1 for t in trials if t.get("refusal_flag"))
+
+                e2_results[model][condition] = {
+                    "d_a": sdt["uv"].get("d_a"),
+                    "s": sdt["uv"].get("s"),
+                    "c": sdt["c"],
+                    "auc": sdt["auc"],
+                    "accuracy": float(np.mean(correct)),
+                    "ece": ece["ece"],
+                    "n_trials": len(trials),
+                    "n_refusal": n_refusal,
+                    "refusal_rate": n_refusal / len(trials),
+                    "uv_converged": sdt["uv"].get("converged", False),
+                    "z_roc": sdt.get("z_roc", {}),
+                }
+
+                d_a_str = f"{sdt['uv']['d_a']:.3f}" if sdt["uv"].get("converged") else "N/A"
+                print(f"  {model} × {condition} (n={len(trials)}): "
+                      f"d_a={d_a_str}, c={sdt['c']:.3f}, "
+                      f"AUC={sdt['auc']:.3f}, acc={np.mean(correct):.3f}, "
+                      f"refusal={n_refusal / len(trials):.3f}")
+
+            # E2 summary: compare conditions
+            conds = e2_results.get(model, {})
+            if all(c in conds for c in ["liberal", "neutral", "conservative"]):
+                d_a_vals = [conds[c]["d_a"] for c in ["liberal", "neutral", "conservative"]]
+                c_vals = [conds[c]["c"] for c in ["liberal", "neutral", "conservative"]]
+                auc_vals = [conds[c]["auc"] for c in ["liberal", "neutral", "conservative"]]
+
+                # d_a should be ~constant; c should shift: liberal < neutral < conservative
+                d_a_range = max(d_a_vals) - min(d_a_vals) if all(v is not None for v in d_a_vals) else float("nan")
+                c_monotonic = (c_vals[0] < c_vals[1] < c_vals[2]) if all(v is not None for v in c_vals) else False
+
+                e2_results[model]["summary"] = {
+                    "d_a_range": float(d_a_range) if not math.isnan(d_a_range) else None,
+                    "d_a_stable": bool(d_a_range < 0.2) if not math.isnan(d_a_range) else None,
+                    "c_monotonic": c_monotonic,
+                    "c_values": {c: conds[c]["c"] for c in ["liberal", "neutral", "conservative"]},
+                    "d_a_values": {c: conds[c]["d_a"] for c in ["liberal", "neutral", "conservative"]},
+                    "auc_values": {c: conds[c]["auc"] for c in ["liberal", "neutral", "conservative"]},
+                    "e2_supported": bool(d_a_range < 0.2 and c_monotonic) if not math.isnan(d_a_range) else None,
+                }
+                s = e2_results[model]["summary"]
+                print(f"  {model} E2 summary: d_a range={s['d_a_range']:.3f}, "
+                      f"c monotonic={s['c_monotonic']}, supported={s['e2_supported']}")
+
+        _save_ckpt("phase5b_e2", e2_results)
 
     # -----------------------------------------------------------------------
     # 6. Save all results
@@ -1079,6 +1399,8 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
                        for m, dsets in all_results.items()},
         "paradigm_b": paradigm_b_results,
         "analysis_a": analysis_a_results,
+        "domain_level": domain_results,
+        "e2_prompt_criterion": e2_results,
         "h1": h1_results,
         "h2": h2_result,
         "h3": h3_results,
@@ -1089,6 +1411,7 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
             "ece_bins": ECE_BINS,
             "bonferroni_alpha": BONFERRONI_ALPHA,
             "n_bootstrap": N_BOOTSTRAP,
+            "domain_min_n": DOMAIN_MIN_N,
         },
     }
 
@@ -1126,19 +1449,33 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
 def run_bootstrap(base_dir: str = r"C:\sdt_calibration"):
     """Run bootstrap CIs separately (computationally expensive).
 
-    ~4 hours CPU for 2 models × 2 datasets × 7 temps × 10000 bootstraps.
+    Parallelised across CPU cores. Saves after each condition so it can
+    be resumed if interrupted.
     """
     output_dir = Path(base_dir) / "results" / "analysis"
     output_dir.mkdir(parents=True, exist_ok=True)
+    boot_file = output_dir / "bootstrap_results.json"
 
-    models = ["llama3_instruct", "mistral_instruct"]
+    n_workers = max(1, cpu_count() - 2)
+    print(f"Bootstrap: {N_BOOTSTRAP} resamples, {n_workers} workers")
+
+    # Load existing results for resume
+    if boot_file.exists():
+        with open(boot_file, "r", encoding="utf-8") as f:
+            bootstrap_results = json.load(f)
+        print(f"  Resuming from {boot_file}")
+    else:
+        bootstrap_results = {}
+
+    models = ["llama3_instruct", "mistral_instruct", "llama3_base"]
     datasets = ["triviaqa", "nq"]
-    domains_map = load_triviaqa_domains(base_dir)
 
-    bootstrap_results = {}
+    total_conditions = 0
+    done_conditions = 0
 
     for model in models:
-        bootstrap_results[model] = {}
+        if model not in bootstrap_results:
+            bootstrap_results[model] = {}
         for dataset in datasets:
             try:
                 trials = load_paradigm_a_results(model, dataset, base_dir)
@@ -1158,8 +1495,19 @@ def run_bootstrap(base_dir: str = r"C:\sdt_calibration"):
                 np.min(all_nlp_t10), np.max(all_nlp_t10) + 1e-10, N_BINS + 1
             )
 
-            bootstrap_results[model][dataset] = {}
+            if dataset not in bootstrap_results[model]:
+                bootstrap_results[model][dataset] = {}
+
             for temp in ALL_TEMPS:
+                total_conditions += 1
+                temp_key = str(temp)
+
+                # Skip if already done
+                if temp_key in bootstrap_results[model][dataset]:
+                    done_conditions += 1
+                    print(f"  {model} × {dataset} × T={temp}: already done, skipping")
+                    continue
+
                 temp_trials = by_temp.get(temp, [])
                 if not temp_trials:
                     continue
@@ -1172,17 +1520,31 @@ def run_bootstrap(base_dir: str = r"C:\sdt_calibration"):
                 if len(nlp_signal) < 10 or len(nlp_noise) < 10:
                     continue
 
-                print(f"  Bootstrap: {model} × {dataset} × T={temp}...")
-                boot = bootstrap_sdt(nlp_signal, nlp_noise, bin_edges)
-                bootstrap_results[model][dataset][str(temp)] = boot
-                print(f"    d_a CI: {boot.get('d_a_ci', 'N/A')}, "
-                      f"AUC CI: {boot.get('auc_ci', 'N/A')}")
+                import time
+                t0 = time.time()
+                done_conditions += 1
+                print(f"  [{done_conditions}/{total_conditions}] "
+                      f"{model} × {dataset} × T={temp} "
+                      f"(sig={len(nlp_signal)}, noi={len(nlp_noise)})...")
 
-    # Save
-    boot_file = output_dir / "bootstrap_results.json"
-    with open(boot_file, "w", encoding="utf-8") as f:
-        json.dump(bootstrap_results, f, indent=2)
-    print(f"\nBootstrap results saved to {boot_file}")
+                boot = bootstrap_sdt(
+                    nlp_signal, nlp_noise, bin_edges,
+                    n_workers=n_workers,
+                    label=f"{model}×{dataset}×T{temp}: ",
+                )
+                elapsed = time.time() - t0
+
+                bootstrap_results[model][dataset][temp_key] = boot
+                print(f"    d_a CI: {boot.get('d_a_ci', 'N/A')}, "
+                      f"AUC CI: {boot.get('auc_ci', 'N/A')}, "
+                      f"converged: {boot.get('n_converged')}/{N_BOOTSTRAP}, "
+                      f"time: {elapsed:.0f}s")
+
+                # Save after each condition for resume
+                with open(boot_file, "w", encoding="utf-8") as f:
+                    json.dump(bootstrap_results, f, indent=2)
+
+    print(f"\nBootstrap complete. Results saved to {boot_file}")
 
 
 # ---------------------------------------------------------------------------
