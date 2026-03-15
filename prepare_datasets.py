@@ -211,9 +211,22 @@ def stratify_triviaqa_domains(
         with open(wiki_cache_path) as f:
             wiki_cache = json.load(f)
 
+    # Determine lookup key for each question.
+    # The nocontext config has empty matched_wiki_entity_name, so we use
+    # answer_value as the Wikipedia lookup key instead. This is documented
+    # as a minor implementation detail — the pre-reg intent (B.1.2) is to
+    # get Wikipedia categories for the answer entity.
+    lookup_keys = {}
+    for q in questions:
+        entity = q.get("matched_wiki_entity_name", "").strip()
+        if not entity:
+            # Fallback: use answer_value directly (works for WikipediaEntity type)
+            entity = q.get("answer_value", "").strip()
+        lookup_keys[id(q)] = entity
+
     entities_to_fetch = set()
     for q in questions:
-        entity = q.get("matched_wiki_entity_name", "")
+        entity = lookup_keys[id(q)]
         if entity and entity not in wiki_cache:
             entities_to_fetch.add(entity)
 
@@ -221,25 +234,34 @@ def stratify_triviaqa_domains(
         print(f"  Skipping Wikipedia API (--skip-wiki-api). {len(entities_to_fetch)} entities uncached.")
         print(f"  Using answer_type field as fallback classification signal.")
     elif entities_to_fetch:
-        print(f"  Fetching Wikipedia categories for {len(entities_to_fetch)} entities...")
+        print(f"  Fetching Wikipedia categories for {len(entities_to_fetch)} unique entities...")
+        print(f"  (Using answer_value as lookup key — matched_wiki_entity_name is empty in nocontext config)")
+        print(f"  Estimated time: ~{len(entities_to_fetch) * 0.12 / 60:.0f} minutes")
         for i, entity in enumerate(sorted(entities_to_fetch)):
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 500 == 0:
                 print(f"    {i+1}/{len(entities_to_fetch)}...")
             cats = fetch_wiki_categories(entity)
             wiki_cache[entity] = cats
             # Rate limit: ~1 request per 100ms to be polite
             time.sleep(0.1)
 
-        # Save cache
+            # Save cache periodically (every 1000 entities) in case of interruption
+            if wiki_cache_path and (i + 1) % 1000 == 0:
+                with open(wiki_cache_path, "w") as f:
+                    json.dump(wiki_cache, f)
+
+        # Save final cache
         if wiki_cache_path:
             wiki_cache_path.parent.mkdir(parents=True, exist_ok=True)
             with open(wiki_cache_path, "w") as f:
                 json.dump(wiki_cache, f)
             print(f"  Saved wiki cache ({len(wiki_cache)} entities)")
+    else:
+        print(f"  All entities already cached ({len(wiki_cache)} in cache)")
 
     # Classify each question
     for q in questions:
-        entity = q.get("matched_wiki_entity_name", "")
+        entity = lookup_keys[id(q)]
         cats = wiki_cache.get(entity, [])
         if cats:
             q["domain"] = classify_by_keywords(cats)
