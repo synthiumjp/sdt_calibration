@@ -7,3 +7,7 @@ results/
 simulation_results/
 test_logits*.py
 ttest_logits*.py
+
+# Track analysis outputs
+!results/analysis/*.json
+!results/analysis/figures/
