@@ -68,6 +68,11 @@ MODEL_CONFIGS = {
         "stop_tokens": ["\n", "<|end_of_text|>"],
         "model_type": "llama3_base",
     },
+    "gemma2_instruct": {
+        "path": r"models\gemma-2-9b-it-Q5_K_M.gguf",
+        "stop_tokens": ["<end_of_turn>"],
+        "model_type": "gemma2_instruct",
+    },
 }
 
 # Top-K logits to store per first-token vector (§A.8(b): top-100)
@@ -98,6 +103,15 @@ def format_prompt_paradigm_a(model_type: str, question: str) -> str:
     elif model_type == "llama3_base":
         # §A.3.3 — Base model raw completion
         return f"{SYSTEM_MSG}\n\nQ: {question}\nA:"
+    elif model_type == "gemma2_instruct":
+        # Gemma-2 instruct — no system role supported, fold into user turn
+        # Same content as other instruct models, Gemma-2 chat template format
+        return (
+            "<start_of_turn>user\n"
+            f"{SYSTEM_MSG}\n\n"
+            f"Q: {question}<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -129,6 +143,13 @@ def format_prompt_paradigm_b(model_type: str, question: str,
         return (
             f"{SYSTEM_MSG}\n\n"
             f"Q: {question}\n{option_block}\nAnswer:"
+        )
+    elif model_type == "gemma2_instruct":
+        return (
+            "<start_of_turn>user\n"
+            f"{SYSTEM_MSG}\n\n"
+            f"Q: {question}\n{option_block}<end_of_turn>\n"
+            "<start_of_turn>model\n"
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
