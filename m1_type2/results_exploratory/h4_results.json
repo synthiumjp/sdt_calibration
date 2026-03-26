@@ -1,0 +1,23 @@
+{
+  "llama3_instruct_vs_mistral_instruct": {
+    "m1_mratio": 0.9825002739088546,
+    "m2_mratio": 0.8522439331432204,
+    "diff_mratio": 0.1302563407656342,
+    "diff_dprime": -0.21089706765711047,
+    "ci_no_overlap": false
+  },
+  "llama3_instruct_vs_llama3_base": {
+    "m1_mratio": 0.9825002739088546,
+    "m2_mratio": 1.0475168113235678,
+    "diff_mratio": -0.06501653741471314,
+    "diff_dprime": -0.021386328821630496,
+    "ci_no_overlap": false
+  },
+  "mistral_instruct_vs_llama3_base": {
+    "m1_mratio": 0.8522439331432204,
+    "m2_mratio": 1.0475168113235678,
+    "diff_mratio": -0.19527287818034733,
+    "diff_dprime": 0.18951073883547997,
+    "ci_no_overlap": false
+  }
+}
