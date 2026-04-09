@@ -64,7 +64,7 @@ def format_chat_prompt(llm, question_text):
     return prompt
 
 
-def generate_answer(llm, question_text, temperature=1.0, max_tokens=32):
+def generate_answer(llm, question_text, temperature=1.0, max_tokens=64):
     """
     Generate an answer and extract NLP.
     Matches M1 inference_engine.py: uses create_completion with logprobs.
