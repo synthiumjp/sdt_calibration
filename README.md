@@ -4,9 +4,9 @@
 
 This repository contains code, data, and analysis scripts for two pre-registered studies applying Signal Detection Theory (SDT) to large language models (LLMs) on factual question-answering tasks.
 
-**Paper 1 (Type-1 SDT):** Tests whether temperature scaling functions as a criterion shift—changing response bias without affecting sensitivity—analogous to payoff manipulations in human psychophysics. Three models, 168,000 trials. Under review at *Computational Brain & Behavior*. Pre-registered at [osf.io/qpk9a](https://osf.io/qpk9a/overview?view_only=28f2894d9fcf4679a8afd2b7d70f6f0b).
+**Paper 1 (Type-1 SDT):** Tests whether temperature scaling functions as a criterion shift—changing response bias without affecting sensitivity—analogous to payoff manipulations in human psychophysics. Three models, 168,000 trials. Under review at *Computational Brain & Behavior*. Pre-registered at [osf.io/qpk9a](https://osf.io/qpk9a). Preprint: [arXiv:2603.14893](https://arxiv.org/abs/2603.14893).
 
-**Paper 2 (Type-2 SDT / M1):** Extends the framework to metacognitive efficiency using meta-d′ and M-ratio (Maniscalco & Lau, 2012; Fleming, 2017). Tests whether LLMs "know what they know" by measuring how well their internal confidence (NLP) monitors their own correctness, controlling for Type-1 sensitivity. Four models, 224,000 trials. Pre-registered at [osf.io/5q7mt](https://osf.io/5q7mt/overview?view_only=bd718de95b6c44ff9c14c1ac424227ba).
+**Paper 2 (Type-2 SDT / M1):** Extends the framework to metacognitive efficiency using meta-d′ and M-ratio (Maniscalco & Lau, 2012; Fleming, 2017). Tests whether LLMs "know what they know" by measuring how well their internal confidence (NLP) monitors their own correctness, controlling for Type-1 sensitivity. Four models, 224,000 trials. Pre-registered at [osf.io/5q7mt](https://osf.io/5q7mt). Preprint: [arXiv:2604.XXXXX](https://arxiv.org/abs/2604.XXXXX) *(update with final arXiv ID once moderation clears)*. Submitted to NeurIPS 2026 Evaluations & Datasets Track.
 
 ## Key Findings
 
@@ -23,8 +23,8 @@ This repository contains code, data, and analysis scripts for two pre-registered
 
 ## Pre-Registration
 
-- **Type-1 (Paper 1):** [OSF Pre-Registration](https://osf.io/qpk9a/overview?view_only=28f2894d9fcf4679a8afd2b7d70f6f0b)
-- **Type-2 (Paper 2 / M1):** [OSF Pre-Registration](https://osf.io/5q7mt/overview?view_only=bd718de95b6c44ff9c14c1ac424227ba)
+- **Type-1 (Paper 1):** [OSF Pre-Registration](https://osf.io/qpk9a)
+- **Type-2 (Paper 2 / M1):** [OSF Pre-Registration](https://osf.io/5q7mt)
 
 ## Repository Structure
 
@@ -97,7 +97,7 @@ This repository contains code, data, and analysis scripts for two pre-registered
 ## Models
 
 | Model | Parameters | Quantisation | Family | Paper |
-|-------|-----------|-------------|--------|-------|
+|---|---|---|---|---|
 | Llama-3-8B-Instruct | 8B | Q5_K_M | Meta | 1, 2 |
 | Mistral-7B-Instruct-v0.3 | 7B | Q5_K_M | Mistral AI | 1, 2 |
 | Llama-3-8B-Base | 8B | Q5_K_M | Meta | 1, 2 |
@@ -107,27 +107,26 @@ Inference via llama-cpp-python 0.3.16 (Vulkan backend) on AMD RX 7900 GRE (16GB 
 
 ## Datasets
 
-- **TriviaQA**: 5,000 questions (unfiltered set, seed=42), classified into 4 knowledge domains + Unclassified
-- **Natural Questions**: 3,000 short-answer questions (NQ-Open subset)
+- **TriviaQA:** 5,000 questions (unfiltered set, seed=42), classified into 4 knowledge domains + Unclassified
+- **Natural Questions:** 3,000 short-answer questions (NQ-Open subset)
 
 ## Design
 
 ### Paper 1 (Type-1 SDT)
-- **Paradigm A**: 3 models × 2 datasets × 7 temperatures × 5,000/3,000 questions = 168,000 trials
-- **Paradigm B**: 3 models × 2,000 TriviaQA questions × 4AFC at T=1.0 = 6,000 trials
-- **Analysis A**: Force-decode at T=1.0 for all models × both datasets
+- **Paradigm A:** 3 models × 2 datasets × 7 temperatures × 5,000/3,000 questions = 168,000 trials
+- **Paradigm B:** 3 models × 2,000 TriviaQA questions × 4AFC at T=1.0 = 6,000 trials
+- **Analysis A:** Force-decode at T=1.0 for all models × both datasets
 
 ### Paper 2 (Type-2 SDT / M1)
-- **Paradigm A extended**: 4 models × 2 datasets × 7 temperatures = 224,000 trials
-- **Type-2 pipeline**: NLP → 8 quantile bins → nR_S1/nR_S2 count arrays → MLE meta-d′ → M-ratio
-- **Bootstrap**: 10,000 resamples per condition, seed=42
-- **Robustness**: nRatings ∈ {3, 4, 6}, UVSDT, equal-width bins, NQ replication
+- **Paradigm A extended:** 4 models × 2 datasets × 7 temperatures = 224,000 trials
+- **Type-2 pipeline:** NLP → 8 quantile bins → nR_S1/nR_S2 count arrays → MLE meta-d′ → M-ratio
+- **Bootstrap:** 10,000 resamples per condition, seed=42
+- **Robustness:** nRatings ∈ {3, 4, 6}, UVSDT, equal-width bins, NQ replication
 
 ## Reproduction
 
 ### Requirements
-
-```
+```bash
 # Paper 1
 pip install numpy scipy matplotlib seaborn
 
@@ -136,13 +135,11 @@ pip install metadpy pymc arviz scikit-learn
 ```
 
 ### Type-1 Figures
-
 ```bash
 python generate_figures.py
 ```
 
 ### Type-2 Analysis (Paper 2)
-
 ```bash
 cd m1_type2
 
@@ -166,16 +163,16 @@ The full inference pipeline requires local GPU access and model files. Scripts a
 ### Paper 1 (Type-1 SDT)
 Seven deviations from the pre-registered plan are documented in the paper's Supplementary Materials:
 
-1. Domain classification: LLM fallback after Wikipedia API failure (93% entity resolution failure)
-2. Llama-3-Base source: QuantFactory instead of bartowski repository
-3. NQ dataset: nq_open subset instead of full NQ filtering
-4. MLE optimisation: z-ROC regression initialisation (11 total fits) instead of 50 random restarts
-5. Paradigm B implementation: minor adjustments to 4AFC format
-6. NLL vectorisation: computational optimisation (no analytical change)
-7. Scoring pipeline: missed-match rate 30.1% (exceeds 3% threshold; documented, not revised)
+1. **Domain classification:** LLM fallback after Wikipedia API failure (93% entity resolution failure)
+2. **Llama-3-Base source:** QuantFactory instead of bartowski repository
+3. **NQ dataset:** `nq_open` subset instead of full NQ filtering
+4. **MLE optimisation:** z-ROC regression initialisation (11 total fits) instead of 50 random restarts
+5. **Paradigm B implementation:** minor adjustments to 4AFC format
+6. **NLL vectorisation:** computational optimisation (no analytical change)
+7. **Scoring pipeline:** missed-match rate 30.1% (exceeds 3% threshold; documented, not revised)
 
 ### Paper 2 (Type-2 SDT / M1)
-One deviation: Gemma-2-9B-Instruct was added post-registration to test cross-family generalisability. All analysis procedures follow the pre-registered protocol. Domain collapse (Pop Culture & Entertainment and Sports merged into Unclassified) matches the Type-1 paper's domain structure.
+One deviation: **Gemma-2-9B-Instruct was added post-registration** to test cross-family generalisability. All analysis procedures follow the pre-registered protocol. Domain collapse (Pop Culture & Entertainment and Sports merged into Unclassified) matches the Type-1 paper's domain structure.
 
 ## Citation
 
@@ -190,8 +187,9 @@ One deviation: Gemma-2-9B-Instruct was added post-registration to test cross-fam
 @article{cacioli2026metacognition,
   author  = {Cacioli, Jon-Paul},
   title   = {Do {LLMs} Know What They Know? {M}easuring Metacognitive Efficiency with Signal Detection Theory},
-  journal = {arXiv preprint},
-  year    = {2026}
+  journal = {arXiv preprint arXiv:2604.XXXXX},
+  year    = {2026},
+  note    = {Submitted to NeurIPS 2026 Evaluations \& Datasets Track}
 }
 ```
 
