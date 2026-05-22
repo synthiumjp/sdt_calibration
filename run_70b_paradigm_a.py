@@ -27,7 +27,7 @@ from mlx_lm.sample_utils import make_sampler
 # ============================================================
 # Configuration
 # ============================================================
-MODEL_PATH = "/Users/chrismarmo/mnt/models-lan/foresight/synthesis-archive/Meta-Llama-3.1-70B-Instruct-bf16-CORRECTED"
+MODEL_PATH = "/path/to/model"
 MODEL_KEY = "llama31_70b_instruct"
 TEMPERATURES = [1.0]
 TEMP_INDEX = {1.0: 4}  # Pre-reg seed: trial_index * 1000 + temp_index
