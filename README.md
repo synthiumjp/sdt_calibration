@@ -4,7 +4,7 @@
 
 This repository contains code, data, and analysis scripts for two pre-registered studies applying Signal Detection Theory (SDT) to large language models (LLMs) on factual question-answering tasks.
 
-**Paper 1 (Type-1 SDT):** Tests whether temperature scaling functions as a criterion shift—changing response bias without affecting sensitivity—analogous to payoff manipulations in human psychophysics. Three models, 168,000 trials. Under review at *Computational Brain & Behavior*. Pre-registered at [osf.io/qpk9a](https://osf.io/qpk9a). Preprint: [arXiv:2603.14893](https://arxiv.org/abs/2603.14893).
+**Paper 1 (Type-1 SDT):** Tests whether temperature scaling functions as a criterion shift—changing response bias without affecting sensitivity—analogous to payoff manipulations in human psychophysics. Five models (7B–70B), 229,000 trials. Submitted to EMNLP 2026 via ACL Rolling Review. Pre-registered at [osf.io/qpk9a](https://osf.io/qpk9a). Preprint: [arXiv:2603.14893](https://arxiv.org/abs/2603.14893).
 
 **Paper 2 (Type-2 SDT / M1):** Extends the framework to metacognitive efficiency using meta-d′ and M-ratio (Maniscalco & Lau, 2012; Fleming, 2017). Tests whether LLMs "know what they know" by measuring how well their internal confidence (NLP) monitors their own correctness, controlling for Type-1 sensitivity. Four models, 224,000 trials. Pre-registered at [osf.io/5q7mt](https://osf.io/5q7mt). Preprint: [arXiv:2604.XXXXX](https://arxiv.org/abs/2604.XXXXX) *(update with final arXiv ID once moderation clears)*. Submitted to NeurIPS 2026 Evaluations & Datasets Track.
 
@@ -12,7 +12,7 @@ This repository contains code, data, and analysis scripts for two pre-registered
 
 ### Type-1 SDT (Paper 1)
 - **Temperature is not a pure criterion manipulation.** It simultaneously changes sensitivity (AUC) and criterion (c).
-- **LLMs exhibit unequal-variance evidence distributions.** z-ROC slopes range from 0.52 to 0.84.
+- **LLMs exhibit unequal-variance evidence distributions.** z-ROC slopes range from 0.56 to 0.78, with asymmetry intensifying with scale within the Meta family (8B: 0.63, 70B: 0.56).
 - **The SDT decomposition reveals structure invisible to ECE.** Models with different sensitivity and bias profiles cannot be distinguished by calibration metrics alone.
 
 ### Type-2 SDT (Paper 2 / M1)
@@ -43,9 +43,12 @@ This repository contains code, data, and analysis scripts for two pre-registered
 ├── run_paradigm_b.py            # Paradigm B: 4AFC forced choice
 ├── run_analysis_a.py            # Analysis A: force-decode
 ├── run_e2_prompt_criterion.py   # E2: prompt-based criterion manipulation
+├── run_70b_paradigm_a.py        # 70B scale probe (MLX, T=1.0 only)
 │
 ├── # Type-1 Analysis (Paper 1)
 ├── scoring.py                   # Exact match + string similarity scoring
+├── rescore_70b.py               # Re-score 70B JSONL with correct answer data
+├── check_verbosity_by_T.py      # Verbosity × temperature analysis
 ├── analysis_pipeline.py         # ROC construction, UVSD fitting, bootstrap CIs
 ├── scoring_robustness.py        # Robustness across similarity thresholds
 ├── secondary_analyses.py        # H4-H6, E1, E5 analyses
@@ -101,9 +104,10 @@ This repository contains code, data, and analysis scripts for two pre-registered
 | Llama-3-8B-Instruct | 8B | Q5_K_M | Meta | 1, 2 |
 | Mistral-7B-Instruct-v0.3 | 7B | Q5_K_M | Mistral AI | 1, 2 |
 | Llama-3-8B-Base | 8B | Q5_K_M | Meta | 1, 2 |
-| Gemma-2-9B-Instruct | 9B | Q5_K_M | Google | 2 |
+| Gemma-2-9B-Instruct | 9B | Q5_K_M | Google | 1, 2 |
+| Llama-3.1-70B-Instruct | 70B | bf16 | Meta | 1 (scale probe) |
 
-Inference via llama-cpp-python 0.3.16 (Vulkan backend) on AMD RX 7900 GRE (16GB VRAM).
+Inference: 7–9B models via llama-cpp-python 0.3.16 (Vulkan backend) on AMD RX 7900 GRE (16GB VRAM). 70B model via MLX on Apple M3 Ultra (512GB unified memory).
 
 ## Datasets
 
@@ -113,7 +117,7 @@ Inference via llama-cpp-python 0.3.16 (Vulkan backend) on AMD RX 7900 GRE (16GB 
 ## Design
 
 ### Paper 1 (Type-1 SDT)
-- **Paradigm A:** 3 models × 2 datasets × 7 temperatures × 5,000/3,000 questions = 168,000 trials
+- **Paradigm A:** 4 models × 2 datasets × 7 temperatures = 224,000 trials + 70B × TriviaQA × T=1.0 = 5,000 trials (229,000 total)
 - **Paradigm B:** 3 models × 2,000 TriviaQA questions × 4AFC at T=1.0 = 6,000 trials
 - **Analysis A:** Force-decode at T=1.0 for all models × both datasets
 
@@ -129,6 +133,9 @@ Inference via llama-cpp-python 0.3.16 (Vulkan backend) on AMD RX 7900 GRE (16GB 
 ```bash
 # Paper 1
 pip install numpy scipy matplotlib seaborn
+
+# Paper 1 (70B scale probe, Apple Silicon only)
+pip install mlx mlx-lm
 
 # Paper 2 (additional)
 pip install metadpy pymc arviz scikit-learn
@@ -161,7 +168,7 @@ The full inference pipeline requires local GPU access and model files. Scripts a
 ## Pre-Registration Deviations
 
 ### Paper 1 (Type-1 SDT)
-Seven deviations from the pre-registered plan are documented in the paper's Supplementary Materials:
+Ten deviations from the pre-registered plan are documented in the paper's Supplementary Materials:
 
 1. **Domain classification:** LLM fallback after Wikipedia API failure (93% entity resolution failure)
 2. **Llama-3-Base source:** QuantFactory instead of bartowski repository
@@ -170,6 +177,9 @@ Seven deviations from the pre-registered plan are documented in the paper's Supp
 5. **Paradigm B implementation:** minor adjustments to 4AFC format
 6. **NLL vectorisation:** computational optimisation (no analytical change)
 7. **Scoring pipeline:** missed-match rate 30.1% (exceeds 3% threshold; documented, not revised)
+8. **Bayesian supplementary analysis:** BF₀₁ for H1 equivalence was not computed
+9. **NLP < -10 sensitivity analysis:** not separately reported (affected <0.1% of trials)
+10. **Llama-3.1-70B-Instruct:** added post-registration as scale-generalisability probe at T=1.0 on TriviaQA
 
 ### Paper 2 (Type-2 SDT / M1)
 One deviation: **Gemma-2-9B-Instruct was added post-registration** to test cross-family generalisability. All analysis procedures follow the pre-registered protocol. Domain collapse (Pop Culture & Entertainment and Sports merged into Unclassified) matches the Type-1 paper's domain structure.

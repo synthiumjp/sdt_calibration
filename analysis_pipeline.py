@@ -818,7 +818,7 @@ def run_full_analysis(base_dir: str = r"C:\sdt_calibration"):
     equiv_bounds = load_equivalence_bounds(base_dir)
     domains_map = load_triviaqa_domains(base_dir)
 
-    models = ["llama3_instruct", "mistral_instruct", "llama3_base"]
+    models = ["llama3_instruct", "mistral_instruct", "llama3_base", "gemma2_instruct", "llama31_70b_instruct"]
     datasets = ["triviaqa", "nq"]
 
     print("=" * 70)
@@ -1467,7 +1467,7 @@ def run_bootstrap(base_dir: str = r"C:\sdt_calibration"):
     else:
         bootstrap_results = {}
 
-    models = ["llama3_instruct", "mistral_instruct", "llama3_base"]
+    models = ["llama3_instruct", "mistral_instruct", "llama3_base", "gemma2_instruct", "llama31_70b_instruct"]
     datasets = ["triviaqa", "nq"]
 
     total_conditions = 0
