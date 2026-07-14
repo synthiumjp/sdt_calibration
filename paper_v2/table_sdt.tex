@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{SDT structure of the Type-2 (correct/incorrect) confidence ROC at $T{=}1.0$. $s$ is the z-ROC slope (ratio of incorrect-to-correct evidence SD); $s<1$ indicates the correct-answer evidence distribution is more variable. $d_a$ is the unequal-variance sensitivity index. Slopes from linear regression on the empirical z-ROC ($R^2\geq0.98$ all cells); the ordering of $s$ replicates on NQ.}
+\label{tab:sdt}
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{AUROC$_2$} & \textbf{z-ROC slope $s$} & $\boldsymbol{d_a}$ & \textbf{$s$ (NQ)} \\
+\midrule
+Llama-3-Instruct & 0.831 & 0.863 & 1.385 & 0.852 \\
+Mistral-Instruct & 0.855 & 0.812 & 1.475 & 0.644 \\
+Llama-3-Base & 0.839 & 1.179 & 1.463 & 1.243 \\
+Gemma-2-Instruct & 0.747 & 0.992 & 0.964 & 1.181 \\
+\bottomrule
+\end{tabular}
+\end{table}
